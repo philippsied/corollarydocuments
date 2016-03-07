@@ -1,0 +1,68 @@
+# -*- mode: ruby -*-
+# # vi: set ft=ruby :
+
+require 'fileutils'
+require 'open-uri'
+require 'tempfile'
+require 'yaml'
+
+Vagrant.require_version ">= 1.6.0"
+
+CLUSTER_IP="10.3.0.1"
+NODE_IP = "172.17.4.99"
+USER_DATA_PATH = File.expand_path("user-data")
+SSL_CONTROLLER_PATH = File.expand_path("ssl/controller.tar")
+SSL_ADMIN_PATH = File.expand_path("ssl/kube-admin.tar")
+KUBECTL_PATH = File.expand_path("kubectl")
+NGINX_RE_PATH = File.expand_path("replic_nginx.yaml")
+NGINX_S_PATH = File.expand_path("service_nginx.yaml")
+
+system("mkdir -p ssl && ./lib/init-ssl-ca ssl") or abort ("failed generating SSL CA artifacts")
+system("./lib/init-ssl ssl apiserver controller IP.1=#{NODE_IP},IP.2=#{CLUSTER_IP}") or abort ("failed generating SSL certificate artifacts")
+system("./lib/init-ssl ssl admin kube-admin") or abort("failed generating admin SSL artifacts")
+
+Vagrant.configure("2") do |config|
+  # always use Vagrant's insecure key
+  config.ssh.insert_key = false
+
+  config.vm.box = "coreos-alpha"
+  config.vm.box_version = ">= 766.0.0"
+  config.vm.box_url = "http://alpha.release.core-os.net/amd64-usr/current/coreos_production_vagrant.json"
+
+  config.vm.provider :virtualbox do |v|
+    v.cpus = 2
+    v.gui = false
+    v.memory = 2048
+
+    # On VirtualBox, we don't have guest additions or a functional vboxsf
+    # in CoreOS, so tell Vagrant that so it can be smarter.
+    v.check_guest_additions = false
+    v.functional_vboxsf     = false
+  end
+
+  # plugin conflict
+  if Vagrant.has_plugin?("vagrant-vbguest") then
+    config.vbguest.auto_update = false
+  end
+
+  config.vm.network :private_network, ip: NODE_IP
+  config.vm.network :forwarded_port, guest: 8000, host: 8000, protocol: "tcp", guest_ip: NODE_IP, host_ip: "127.0.0.1"
+  config.vm.network :forwarded_port, guest: 8888, host: 8888, protocol: "tcp", guest_ip: NODE_IP, host_ip: "127.0.0.1"
+
+  config.vm.provision :file, :source => SSL_CONTROLLER_PATH, :destination => "/tmp/sslc.tar"
+  config.vm.provision :file, :source => SSL_ADMIN_PATH, :destination => "/tmp/ssla.tar"
+  config.vm.provision :shell, :inline => "mkdir -p /etc/kubernetes/ssl && tar -C /etc/kubernetes/ssl -xf /tmp/sslc.tar && tar -C /etc/kubernetes/ssl -xf /tmp/ssla.tar", :privileged => true
+  
+  config.vm.provision :file, :source => USER_DATA_PATH, :destination => "/tmp/vagrantfile-user-data"
+  config.vm.provision :shell, :inline => "mv /tmp/vagrantfile-user-data /var/lib/coreos-vagrant/", :privileged => true
+  
+  config.vm.provision :file, :source => KUBECTL_PATH, :destination => "/tmp/kubectl"
+  config.vm.provision :shell, :inline => "mkdir -p /opt/nsm && mv /tmp/kubectl /opt/nsm/kubectl && chmod +x /opt/nsm/kubectl", :privileged => true
+
+  config.vm.provision :file, :source => NGINX_RE_PATH, :destination => "/tmp/replic_nginx.yaml"
+  config.vm.provision :file, :source => NGINX_S_PATH, :destination => "/tmp/service_nginx.yaml"
+  config.vm.provision :shell, :inline => "mv /tmp/replic_nginx.yaml /opt/nsm/replic_nginx.yaml && chmod ugo+r /opt/nsm/replic_nginx.yaml", :privileged => true
+  config.vm.provision :shell, :inline => "mv /tmp/service_nginx.yaml /opt/nsm/service_nginx.yaml && chmod ugo+r /opt/nsm/service_nginx.yaml", :privileged => true
+  
+  
+end
